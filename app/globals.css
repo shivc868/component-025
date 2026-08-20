@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* Route every Tailwind font-sans utility (and the default body stack)
+   through the Space Grotesk variable set up in app/layout.jsx. */
+@theme inline {
+  --font-sans: var(--font-space-grotesk), "Space Grotesk", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #e9e9e9;
+  font-family: var(--font-space-grotesk), "Space Grotesk", "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+}
