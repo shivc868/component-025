@@ -731,6 +731,138 @@ function TypographyGlobe({ drag, isDark }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Companions — moon, orbit path, star dust                                   */
+/*  Same rules as the globe: colours tween with GSAP on theme flips, motion    */
+/*  is delta-clamped, and nothing here takes pointer input.                    */
+/* -------------------------------------------------------------------------- */
+
+function Moon({ isDark }) {
+  const orbit = useRef(null);
+  const moonMat = useRef(null);
+  const pathMat = useRef(null);
+
+  useEffect(() => {
+    if (moonMat.current) {
+      gsap.to(moonMat.current.color, {
+        ...new THREE.Color(isDark ? "#46464e" : "#d9d4ca"),
+        duration: 0.9,
+        ease: "power2.inOut",
+      });
+    }
+    if (pathMat.current) {
+      gsap.to(pathMat.current.color, {
+        ...new THREE.Color(isDark ? "#f4f4f4" : "#0b0b0b"),
+        duration: 0.9,
+        ease: "power2.inOut",
+      });
+      gsap.to(pathMat.current, {
+        opacity: isDark ? 0.16 : 0.1,
+        duration: 0.9,
+        ease: "power2.inOut",
+      });
+    }
+  }, [isDark]);
+
+  useFrame((_, delta) => {
+    if (orbit.current) orbit.current.rotation.y += Math.min(delta, 0.1) * 0.28;
+  });
+
+  return (
+    /* Shares the globe's centre; the tilt makes the orbit cut in front of the
+       sphere at the bottom and behind it at the top, which is what sells the
+       scene as a volume instead of layered flat cut-outs. */
+    <group position={[0, 0.42, 0]} rotation={[0.46, 0, -0.18]}>
+      <group ref={orbit}>
+        <mesh position={[3.15, 0, 0]}>
+          <sphereGeometry args={[0.17, 48, 48]} />
+          <meshStandardMaterial
+            ref={moonMat}
+            color="#d9d4ca"
+            roughness={0.85}
+            metalness={0}
+          />
+        </mesh>
+      </group>
+
+      {/* The moon's track, drawn as a hairline ring in world space so it
+          foreshortens into an ellipse exactly like the orbit it describes. */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[3.135, 3.155, 180]} />
+        <meshBasicMaterial
+          ref={pathMat}
+          color="#0b0b0b"
+          transparent
+          opacity={0.1}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+function Stars({ isDark }) {
+  const cloud = useRef(null);
+  const mat = useRef(null);
+
+  const geometry = useMemo(() => {
+    const COUNT = 380;
+    const positions = new Float32Array(COUNT * 3);
+    for (let i = 0; i < COUNT; i++) {
+      // A wide shell kept strictly behind the globe (z <= -6): dust that
+      // drifted in front of the camera would attenuate into huge blobs.
+      const radius = 6 + Math.random() * 20;
+      const theta = Math.random() * Math.PI * 2;
+      positions[i * 3] = Math.cos(theta) * radius;
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
+      positions[i * 3 + 2] = -6 - Math.abs(Math.sin(theta)) * radius;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    return g;
+  }, []);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  useEffect(() => {
+    if (!mat.current) return;
+    gsap.to(mat.current.color, {
+      ...new THREE.Color(isDark ? "#ffffff" : "#7c766b"),
+      duration: 0.9,
+      ease: "power2.inOut",
+    });
+    gsap.to(mat.current, {
+      opacity: isDark ? 0.75 : 0.35,
+      duration: 0.9,
+      ease: "power2.inOut",
+    });
+  }, [isDark]);
+
+  useFrame(({ clock }) => {
+    // A slow sway rather than a spin: rotation stays within a few degrees, so
+    // no point can ever swing around from behind the globe into the camera.
+    if (cloud.current) {
+      cloud.current.rotation.y = Math.sin(clock.elapsedTime * 0.05) * 0.06;
+    }
+  });
+
+  return (
+    <group ref={cloud}>
+      <points geometry={geometry}>
+        <pointsMaterial
+          ref={mat}
+          size={0.06}
+          sizeAttenuation
+          color="#7c766b"
+          transparent
+          opacity={0.35}
+          depthWrite={false}
+        />
+      </points>
+    </group>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Component                                                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -740,6 +872,9 @@ export default function TextSphere() {
   const shellRef = useRef(null);
   const lightRef = useRef(null);
   const darkRef = useRef(null);
+  const wordmarkRef = useRef(null);
+  const ringsRef = useRef(null);
+  const parallaxFns = useRef(null);
 
   // Drag targets live in a ref: they are written at pointer rate and read at
   // frame rate, so they must never trigger a React re-render. `spin` is the
@@ -783,6 +918,32 @@ export default function TextSphere() {
     return () => ctx.revert();
   }, []);
 
+  /* Cursor parallax: the wordmark and the ring stack drift at different rates
+     and in opposite directions, so the flat background layers separate into
+     depth planes the moment the pointer moves. quickTo reuses one tween per
+     property, which keeps this cheap at pointer-event rate. */
+  useEffect(() => {
+    if (!wordmarkRef.current || !ringsRef.current) return;
+    const opts = { duration: 1.2, ease: "power3.out" };
+    parallaxFns.current = {
+      wx: gsap.quickTo(wordmarkRef.current, "x", opts),
+      wy: gsap.quickTo(wordmarkRef.current, "y", opts),
+      rx: gsap.quickTo(ringsRef.current, "x", opts),
+      ry: gsap.quickTo(ringsRef.current, "y", opts),
+    };
+  }, []);
+
+  const onParallax = useCallback((e) => {
+    const p = parallaxFns.current;
+    if (!p) return;
+    const nx = e.clientX / window.innerWidth - 0.5;
+    const ny = e.clientY / window.innerHeight - 0.5;
+    p.wx(nx * -34); // far plane: moves against the cursor
+    p.wy(ny * -22);
+    p.rx(nx * 18); // near plane: moves with it
+    p.ry(ny * 12);
+  }, []);
+
   const onPointerDown = useCallback((e) => {
     drag.current.active = true;
     drag.current.px = e.clientX;
@@ -821,6 +982,7 @@ export default function TextSphere() {
       ref={shellRef}
       className="relative h-screen w-full overflow-hidden select-none"
       style={{ backgroundColor: palette.base }}
+      onPointerMove={onParallax}
     >
       {/* ---------------------------------------------------------------- */}
       {/*  Backdrop stack                                                   */}
@@ -841,8 +1003,13 @@ export default function TextSphere() {
       />
 
       {/* Oversized wordmark sitting behind the globe — the sphere eclipses it,
-          which is what gives the composition depth instead of a floating ball. */}
-      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          which is what gives the composition depth instead of a floating ball.
+          The ref is the parallax handle: GSAP translates this wrapper, so the
+          span inside stays free for the entrance reveal. */}
+      <div
+        ref={wordmarkRef}
+        className="pointer-events-none absolute inset-0 flex items-center justify-center"
+      >
         <span
           data-reveal
           className={`-translate-y-[7vh] whitespace-nowrap text-[26vw] leading-none font-semibold tracking-[-0.05em] ${
@@ -852,6 +1019,71 @@ export default function TextSphere() {
           EARTH
         </span>
       </div>
+
+      {/* Concentric survey rings between the wordmark and the globe. Flat SVG,
+          but parallaxed against the wordmark so the two planes separate. */}
+      <div
+        ref={ringsRef}
+        className="pointer-events-none absolute inset-0 flex items-center justify-center"
+      >
+        <svg
+          data-reveal
+          viewBox="0 0 100 100"
+          fill="none"
+          className={`h-[160vmin] w-[160vmin] shrink-0 -translate-y-[6vh] transition-colors duration-700 ${
+            isDark ? "text-white/[0.09]" : "text-black/[0.09]"
+          }`}
+        >
+          <circle cx="50" cy="50" r="21" stroke="currentColor" strokeWidth="0.07" />
+          <circle
+            cx="50"
+            cy="50"
+            r="28"
+            stroke="currentColor"
+            strokeWidth="0.07"
+            strokeDasharray="0.7 1.5"
+          />
+          <circle cx="50" cy="50" r="36" stroke="currentColor" strokeWidth="0.07" />
+          <circle
+            cx="50"
+            cy="50"
+            r="45"
+            stroke="currentColor"
+            strokeWidth="0.07"
+            strokeDasharray="0.2 1.2"
+          />
+          {/* Tick marks on the outer ring, like a survey dial. */}
+          {Array.from({ length: 24 }, (_, i) => {
+            const a = (i / 24) * Math.PI * 2;
+            const x1 = 50 + Math.cos(a) * 44;
+            const y1 = 50 + Math.sin(a) * 44;
+            const x2 = 50 + Math.cos(a) * 46;
+            const y2 = 50 + Math.sin(a) * 46;
+            return (
+              <line
+                key={i}
+                x1={x1}
+                y1={y1}
+                x2={x2}
+                y2={y2}
+                stroke="currentColor"
+                strokeWidth="0.09"
+              />
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Depth vignette: gently darkened corners curve the backdrop away from
+          the viewer, so the flat washes read as a space instead of a wall. */}
+      <div
+        className="pointer-events-none absolute inset-0 transition-opacity duration-700"
+        style={{
+          background:
+            "radial-gradient(125% 105% at 50% 42%, transparent 55%, rgba(8,8,10,0.38) 100%)",
+          opacity: isDark ? 0.9 : 0.35,
+        }}
+      />
 
       {/* Contact shadow: grounds the sphere so it reads as lit, not pasted. */}
       <div
@@ -891,7 +1123,9 @@ export default function TextSphere() {
             position={[-6, -2, 2]}
             intensity={isDark ? 0.7 : 0.5}
           />
+          <Stars isDark={isDark} />
           <TypographyGlobe drag={drag} isDark={isDark} />
+          <Moon isDark={isDark} />
         </Canvas>
       </div>
 
@@ -914,11 +1148,8 @@ export default function TextSphere() {
           </div>
 
           <div data-reveal className="flex items-center gap-5">
-            <span
-              className={`hidden text-[11px] uppercase tracking-[0.32em] sm:inline ${muted}`}
-            >
-              01 / Inner system
-            </span>
+            {/* Instrument-panel button: hard-cornered frame, label, solid
+                switch block, and a survey crosshair kissing the top-left corner. */}
             <button
               type="button"
               onClick={() => setIsDark((v) => !v)}
@@ -926,13 +1157,40 @@ export default function TextSphere() {
               aria-label={
                 isDark ? "Switch to light mode" : "Switch to dark mode"
               }
-              className={`pointer-events-auto cursor-pointer rounded-full border px-4 py-1.5 text-[11px] font-medium uppercase tracking-[0.24em] backdrop-blur-sm transition-colors duration-300 ${
+              className={`pointer-events-auto relative flex cursor-pointer items-stretch border text-[11px] font-medium uppercase tracking-[0.24em] backdrop-blur-sm transition-colors duration-300 ${
                 isDark
-                  ? "border-white/20 text-white hover:bg-white/10"
-                  : "border-black/15 text-black hover:bg-black/[0.06]"
+                  ? "border-white/30 text-white hover:bg-white/10"
+                  : "border-black/25 text-black hover:bg-black/[0.06]"
               }`}
             >
-              {isDark ? "Light" : "Dark"}
+              <span
+                aria-hidden
+                className="absolute -top-[5px] -left-[5px] block h-[9px] w-[9px]"
+              >
+                <span
+                  className={`absolute top-1/2 left-0 h-px w-full ${
+                    isDark ? "bg-white" : "bg-black"
+                  }`}
+                />
+                <span
+                  className={`absolute left-1/2 top-0 h-full w-px ${
+                    isDark ? "bg-white" : "bg-black"
+                  }`}
+                />
+              </span>
+              <span className="px-4 py-2">{isDark ? "Light" : "Dark"}</span>
+              <span
+                className={`flex w-9 flex-col items-center justify-center gap-[3px] ${
+                  isDark ? "bg-white" : "bg-black"
+                }`}
+              >
+                <span
+                  className={`h-[2px] w-3.5 ${isDark ? "bg-black" : "bg-white"}`}
+                />
+                <span
+                  className={`h-[2px] w-3.5 ${isDark ? "bg-black" : "bg-white"}`}
+                />
+              </span>
             </button>
           </div>
         </header>
