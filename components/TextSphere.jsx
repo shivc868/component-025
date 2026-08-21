@@ -3,41 +3,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
+import { FontLoader } from "three/examples/jsm/loaders/FontLoader.js";
+import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import gsap from "gsap";
+import tubeFont from "./fonts/helvetiker_bold.typeface.json";
 
-/* -------------------------------------------------------------------------- */
-/*  Content + theme tokens                                                     */
-/* -------------------------------------------------------------------------- */
+/* ---- content + theme ---- */
 
 const PARAGRAPH = `Earth is the third planet from the Sun and the only world we know of where liquid water covers the surface. It races around the Sun at thirty kilometres a second, spinning once on its tilted axis each day. Beneath our feet a molten iron core generates the magnetic field that shields the atmosphere. A thin veil of gases, barely a hundred kilometres of breathable sky, is all that separates every living thing from the vacuum of space. Oceans hold ninety seven percent of its water and drive the weather that carves its restless surface.`;
 
-/* The band always holds exactly this many full lines. Words flow from
-   PARAGRAPH until every line is packed edge to edge (cycling back to the start
-   if the copy runs short), so keep it long enough to fill the band — anything
-   left over is simply not drawn. */
+// The band always shows exactly this many packed lines; leftover copy is dropped.
 const MAX_LINES = 4;
 
 const THEME = {
-  light: {
-    base: "#e8e6e2",
-    sphere: "#ffffff",
-    land: "#d5d0c6",
-    text: "#0b0b0b",
-    // Two washes plus a warm floor: flat fills are what made this read as raw.
-    backdrop:
-      "radial-gradient(120% 90% at 50% 8%, #f6f5f3 0%, #e8e6e2 46%, #d6d3cd 100%)",
-  },
-  dark: {
-    base: "#0d0d0f",
-    sphere: "#050505",
-    land: "#26262b",
-    text: "#f4f4f4",
-    backdrop:
-      "radial-gradient(120% 90% at 50% 8%, #232327 0%, #131315 46%, #0a0a0b 100%)",
-  },
+  base: "#0d0d0f",
+  // slightly blue so the globe matches the glass wordmark
+  sphere: "#c9d8ee",
+  land: "#a7b4c8",
+  text: "#0b0b0b",
+  backdrop:
+    "radial-gradient(120% 90% at 50% 8%, #232327 0%, #131315 46%, #0a0a0b 100%)",
 };
 
-/* Editorial furniture. Kept as data so the layout stays declarative. */
+const MENU_ITEMS = [
+  { label: "Atlas", desc: "Surface maps, coastlines & terrain" },
+  { label: "Orbit", desc: "Trajectory, axial tilt & seasons" },
+  { label: "Data", desc: "Physical & orbital statistics" },
+  { label: "Oceans", desc: "Currents, tides & sea temperature" },
+  { label: "Atmosphere", desc: "Weather systems & the thin blue veil" },
+  { label: "Missions", desc: "Satellites & observation programmes" },
+];
+
 const STATS = [
   { label: "Diameter", value: "12,742", unit: "km" },
   { label: "Orbital period", value: "365.25", unit: "days" },
@@ -45,26 +42,14 @@ const STATS = [
   { label: "Age", value: "4.54", unit: "Gyr" },
 ];
 
-/* Film grain, inline so the page stays self-contained — a flat gradient reads
-   as plastic at this scale, and a little noise is what kills the banding. */
+// Inline film grain — kills gradient banding.
 const GRAIN =
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E";
 
-/* Texture / geometry proportions.
-
-   The type is painted onto a full sphere shell a hair larger than the solid
-   one, so every glyph is bedded into the surface curvature. Which latitudes it
-   occupies is controlled purely by the texture's V offset — dragging slides the
-   band up toward the north pole or down toward the south, and the sphere itself
-   never moves. Because the shell's circumference shrinks as sin(theta), the
-   text naturally compresses and curves as it climbs toward a pole.
-
-   BAND_V_SPAN is the slice of the sphere's 0..1 V range the band covers, derived
-   from the canvas aspect so the text is undistorted when it sits at the equator. */
-/* Both dimensions MUST stay powers of two. The shell repeats this texture
-   around the equator and mipmaps it; a non-power-of-two size combined with
-   RepeatWrapping samples as fully transparent on strict drivers, which silently
-   erases the entire band. 4096x1024 also keeps the 4:1 aspect the wrap expects. */
+// The text lives on a shell slightly larger than the globe; dragging only
+// slides the texture's V offset, so the band curves as it nears a pole.
+// Keep both dimensions powers of two — NPOT + wrapping samples as transparent
+// on strict drivers.
 const CANVAS_W = 4096;
 const CANVAS_H = 512;
 const SPHERE_RADIUS = 1.62;
@@ -72,77 +57,61 @@ const SHELL_GAP = 0.04; // lifts the type clear of the surface so it hovers
 const SHELL_RADIUS = SPHERE_RADIUS + SHELL_GAP;
 const BAND_V_SPAN = (2 * CANVAS_H) / CANVAS_W;
 
-/* How far the band may climb. 1.0 would park its edge exactly on a pole, but a
-   four-line band that high sits over the horizon and reads as no text at all,
-   so stop short: the type reaches the top of the visible face and stays there. */
+// How far the band may climb — 1.0 would push it over the visible horizon.
 const MAX_LAT = 0.7;
 
-/* Earth's real axial tilt — the same figure the stat row quotes — and how fast
-   the globe turns, in radians per second. Deliberately slower than the type's
-   drift so the band visibly overtakes the surface instead of riding along. */
+// Real axial tilt; spin kept slower than the text drift on purpose.
 const AXIAL_TILT = (23.44 * Math.PI) / 180;
 const GLOBE_SPIN = 0.33;
 
-/* Map a latitude in -1 (south pole) .. 1 (north pole) to the texture V offset
-   that puts the band there. The ends are where the band's edge kisses a pole,
-   so the text always stays on the sphere instead of collapsing through it. */
+// Maps latitude (-1..1) to the texture V offset that puts the band there.
 function bandOffset(lat) {
-  // Coerce hard: a single NaN reaching texture.offset poisons the UV matrix and
-  // the whole band silently stops sampling. Fast Refresh can hand us a ref from
-  // an older shape where `lat` did not exist yet, so this is not theoretical.
+  // a NaN reaching texture.offset silently kills the whole band
   const safe = Number.isFinite(lat) ? Math.max(-1, Math.min(1, lat)) : 0;
   const centre = 0.5 + safe * (0.5 - BAND_V_SPAN / 2);
   return 1 - (centre + BAND_V_SPAN / 2) / BAND_V_SPAN;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Canvas 2D -> THREE.CanvasTexture                                           */
-/*  No 3D text geometry: one draw call, one texture, zero glyph tessellation.   */
-/* -------------------------------------------------------------------------- */
+/* ---- band texture (Canvas 2D -> CanvasTexture) ---- */
 
-function createTextTexture(text, color) {
-  // Client-only: guard against the Next.js server render pass.
+function createTextTexture(text, color, scale = 1) {
+  // guard against the server render pass
   if (typeof document === "undefined") return null;
 
+  // scale < 1 halves the texture on low-power devices; aspect stays the same
+  const W = CANVAS_W * scale;
+  const H = CANVAS_H * scale;
+
   const canvas = document.createElement("canvas");
-  canvas.width = CANVAS_W;
-  canvas.height = CANVAS_H;
+  canvas.width = W;
+  canvas.height = H;
 
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+  ctx.clearRect(0, 0, W, H);
 
-  const maxHeight = CANVAS_H * 0.88;
+  const maxHeight = H * 0.88;
   const font = (size) =>
     `500 ${size}px "Space Grotesk", "Helvetica Neue", Helvetica, Arial, sans-serif`;
 
-  // The band always holds MAX_LINES full lines, so the size is fixed by the
-  // canvas height — no shrink-to-fit. The copy adapts to the space, not the
-  // other way round.
   const fontSize = Math.floor(maxHeight / (MAX_LINES * 1.12));
   const lineHeight = fontSize * 1.12;
 
-  // Set the font AND the tracking before measuring — letterSpacing changes
-  // what measureText reports, so it must match what fillText will draw.
+  // letterSpacing changes what measureText reports — set it before measuring
   ctx.font = font(fontSize);
   ctx.textBaseline = "middle";
   ctx.fillStyle = color;
   if ("letterSpacing" in ctx) ctx.letterSpacing = "-0.08em";
 
-  /* Pack every line edge to edge with words at their natural spacing. The
-     canvas wraps exactly once around the sphere, so a part-filled line leaves
-     a blank seam where its end meets its start; instead of stretching the
-     spaces to close it, words keep flowing (cycling back through the copy if
-     it runs short) until no more fit. The leftover — always less than one
-     word — is what remains at the seam, and it reads as an ordinary gap. */
+  // Pack each line edge to edge, cycling the copy, so the wrap seam ends up
+  // smaller than a word and reads as an ordinary gap.
   const sourceWords = text.split(/\s+/);
   const spaceW = ctx.measureText(" ").width;
   const lines = [];
   let w = 0;
 
-  // Reserve one word-space at the seam: a line packed flush to the very edge
-  // meets its own first word with zero gap and two words fuse into one.
-  const lineBudget = CANVAS_W - spaceW;
+  // reserve one word-space at the seam so two words never fuse
+  const lineBudget = W - spaceW;
 
   for (let i = 0; i < MAX_LINES; i++) {
     let line = "";
@@ -160,22 +129,17 @@ function createTextTexture(text, color) {
   }
 
   ctx.textAlign = "center";
-  const blockTop =
-    CANVAS_H / 2 - (lines.length * lineHeight) / 2 + lineHeight / 2;
-  lines.forEach((l, i) =>
-    ctx.fillText(l, CANVAS_W / 2, blockTop + i * lineHeight),
-  );
+  const blockTop = H / 2 - (lines.length * lineHeight) / 2 + lineHeight / 2;
+  lines.forEach((l, i) => ctx.fillText(l, W / 2, blockTop + i * lineHeight));
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 16;
+  texture.anisotropy = scale < 1 ? 8 : 16;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
 
-  // Clamp on both axes. U already spans 0..1 exactly once around the shell so
-  // repeating buys nothing, and clamping keeps this off the NPOT/repeat path
-  // that some drivers resolve to a fully transparent sample. Outside the band
-  // the shell reads the canvas's transparent edge row, so the sphere stays bare.
+  // Clamp both axes — keeps us off the repeat path some drivers resolve to
+  // a fully transparent sample.
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.repeat.set(1, 1 / BAND_V_SPAN);
@@ -185,15 +149,7 @@ function createTextTexture(text, color) {
   return texture;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Continents                                                                 */
-/*                                                                             */
-/*  Simplified coastlines as [lon, lat] rings, painted into an equirectangular  */
-/*  canvas — the same trick as the type, so the whole component still ships     */
-/*  with zero external assets. Drawn white on transparent: the material's       */
-/*  colour tints them, which means one texture serves both themes and the       */
-/*  land can cross-fade with GSAP instead of being rebuilt on every toggle.     */
-/* -------------------------------------------------------------------------- */
+/* ---- continents: simplified coastlines as [lon, lat] rings ---- */
 
 const LAND_W = 2048;
 const LAND_H = 1024;
@@ -519,21 +475,24 @@ const COASTLINES = [
   ],
 ];
 
-function createLandTexture() {
+function createLandTexture(scale = 1) {
   if (typeof document === "undefined") return null;
 
+  const W = LAND_W * scale;
+  const H = LAND_H * scale;
+
   const canvas = document.createElement("canvas");
-  canvas.width = LAND_W;
-  canvas.height = LAND_H;
+  canvas.width = W;
+  canvas.height = H;
 
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.clearRect(0, 0, LAND_W, LAND_H);
+  ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = "#ffffff";
 
-  // Equirectangular: longitude spans the width, latitude the height.
-  const px = (lon) => ((lon + 180) / 360) * LAND_W;
-  const py = (lat) => ((90 - lat) / 180) * LAND_H;
+  // equirectangular: longitude across, latitude down
+  const px = (lon) => ((lon + 180) / 360) * W;
+  const py = (lat) => ((90 - lat) / 180) * H;
 
   for (const ring of COASTLINES) {
     ctx.beginPath();
@@ -547,32 +506,244 @@ function createLandTexture() {
     ctx.fill();
   }
 
-  // Antarctica is a cap, not a ring — fill the bottom band outright.
-  ctx.fillRect(0, py(-68), LAND_W, LAND_H - py(-68));
+  // Antarctica is a cap, not a ring — fill the bottom band outright
+  ctx.fillRect(0, py(-68), W, H - py(-68));
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 16;
+  texture.anisotropy = scale < 1 ? 8 : 16;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
   texture.needsUpdate = true;
   return texture;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  The sphere + orbiting text band                                            */
-/* -------------------------------------------------------------------------- */
+/* ---- "earth" wordmark: bevelled 3D type with a liquid-fill shader ---- */
 
-function TypographyGlobe({ drag, isDark }) {
+// Shared GLSL: the liquid surface is two travelling sines around a CPU-fed
+// level, in object space so parallax never sloshes it.
+const LIQUID_SURFACE = `
+  float lvl = uLevel
+    + sin(vTubePos.x * 1.6 + uTime * uWaveSpeed) * uWaveAmp
+    + sin(vTubePos.x * 3.7 - uTime * uWaveSpeed * 1.6) * uRippleAmp;
+  float inLiquid = smoothstep(lvl + 0.04, lvl - 0.04, vTubePos.y);
+`;
+
+// Final wordmark look. Liquid fields are 0..1 relative to glyph height.
+const WORDMARK_CONFIG = {
+  size: 6,
+  depth: 0.3,
+  roundness: 0.1,
+  puff: 0.13,
+  smoothness: 16,
+  widthFit: 0.47,
+  posY: 3.8,
+  posZ: -7.5,
+  parallaxAmt: 0.45,
+  glassColor: "#89b4f2",
+  glassOpacity: 0.8,
+  glassRoughness: 1,
+  clearcoat: 0.81,
+  clearcoatRough: 0,
+  transmission: 0.89,
+  ior: 1.7,
+  thickness: 5,
+  envIntensity: 2.5,
+  fill: 0.69,
+  liquidColor: "#227bff",
+  liquidOpacity: 0.86,
+  waveHeight: 0.114,
+  rippleHeight: 0.02,
+  waveSpeed: 0.5,
+  bobHeight: 0.02,
+  bobSpeed: 0.4,
+  rimStrength: 1.5,
+  glowColor: "#0058ef",
+  glowStrength: 2,
+};
+
+function LiquidWordmark({ parallax, lowPower = false }) {
+  const group = useRef(null);
+  const shaderRef = useRef(null);
+  const viewportProbe = useRef(new THREE.Vector3());
+
+  // Mobile drops the transmission pass and halves the bevel segments for a
+  // steady frame rate; the word also spans more of the narrow viewport.
+  const c = useMemo(
+    () =>
+      lowPower
+        ? {
+            ...WORDMARK_CONFIG,
+            transmission: 0,
+            glassOpacity: 0.9,
+            smoothness: 8,
+            widthFit: 0.78,
+          }
+        : WORDMARK_CONFIG,
+    [lowPower],
+  );
+
+  const geometry = useMemo(() => {
+    const font = new FontLoader().parse(tubeFont);
+    const g = new TextGeometry("earth", {
+      font,
+      size: c.size,
+      depth: c.depth,
+      curveSegments: lowPower ? 6 : 10,
+      // the deep bevel is what puffs the strokes into rounded tubing
+      bevelEnabled: true,
+      bevelThickness: c.puff * c.size * 0.31,
+      bevelSize: c.roundness * c.size * 0.31,
+      bevelSegments: c.smoothness,
+    });
+    g.center();
+    g.computeBoundingBox();
+    return g;
+  }, [c, lowPower]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  // Reflections for the wordmark only — scene.environment would light the
+  // matte globe too.
+  const gl = useThree((s) => s.gl);
+  const envMap = useMemo(() => {
+    const pmrem = new THREE.PMREMGenerator(gl);
+    const tex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+    return tex;
+  }, [gl]);
+  useEffect(() => () => envMap.dispose(), [envMap]);
+
+  const material = useMemo(() => {
+    const m = new THREE.MeshPhysicalMaterial({
+      color: c.glassColor,
+      roughness: c.glassRoughness,
+      metalness: 0,
+      clearcoat: c.clearcoat,
+      clearcoatRoughness: c.clearcoatRough,
+      transmission: c.transmission,
+      ior: c.ior,
+      thickness: c.thickness,
+      envMap,
+      envMapIntensity: c.envIntensity,
+      transparent: true,
+      // no depth write: the inner bevels show through the near wall
+      side: THREE.FrontSide,
+      depthWrite: false,
+    });
+    m.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, {
+        uTime: { value: 0 },
+        uLevel: { value: (c.fill - 0.5) * c.size * 0.96 },
+        uWaveAmp: { value: c.waveHeight * c.size },
+        uRippleAmp: { value: c.rippleHeight * c.size },
+        uWaveSpeed: { value: c.waveSpeed },
+        uGlassAlpha: { value: c.glassOpacity },
+        uLiquidAlpha: { value: c.liquidOpacity },
+        uRim: { value: c.rimStrength },
+        uGlowStrength: { value: c.glowStrength },
+        uLiquidColor: { value: new THREE.Color(c.liquidColor) },
+        uGlowColor: { value: new THREE.Color(c.glowColor) },
+      });
+      shaderRef.current = shader;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vTubePos;",
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvTubePos = position;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+uniform float uTime, uLevel, uWaveAmp, uRippleAmp, uWaveSpeed;
+uniform float uGlassAlpha, uLiquidAlpha, uRim, uGlowStrength;
+uniform vec3 uLiquidColor, uGlowColor;
+varying vec3 vTubePos;`,
+        )
+        .replace(
+          "#include <color_fragment>",
+          `#include <color_fragment>
+{
+  ${LIQUID_SURFACE}
+  diffuseColor.rgb = mix(diffuseColor.rgb, uLiquidColor, inLiquid);
+  // Glass above the surface is nearly clear; liquid below is dense.
+  diffuseColor.a = mix(uGlassAlpha, uLiquidAlpha, inLiquid);
+  // Bright meniscus where the surface meets the tube wall.
+  float rim = smoothstep(0.07, 0.0, abs(vTubePos.y - lvl));
+  diffuseColor.rgb += vec3(0.45, 0.7, 1.0) * rim * uRim;
+}`,
+        )
+        .replace(
+          "#include <emissivemap_fragment>",
+          `#include <emissivemap_fragment>
+{
+  ${LIQUID_SURFACE}
+  // The liquid glows so it stays saturated past the terminator.
+  totalEmissiveRadiance += uGlowColor * uGlowStrength * inLiquid;
+}`,
+        );
+    };
+    return m;
+  }, [envMap, c]);
+  useEffect(() => () => material.dispose(), [material]);
+
+  useFrame(({ clock, camera, viewport }) => {
+    const t = clock.elapsedTime;
+
+    // only the clock and the bobbing liquid level move per frame
+    const shader = shaderRef.current;
+    if (shader) {
+      shader.uniforms.uTime.value = t;
+      shader.uniforms.uLevel.value =
+        (c.fill - 0.5) * c.size * 0.96 +
+        Math.sin(t * c.bobSpeed) * c.bobHeight * c.size;
+    }
+
+    if (!group.current) return;
+
+    // scale the word to span widthFit of the visible width at its depth
+    const v = viewport.getCurrentViewport(
+      camera,
+      viewportProbe.current.set(0, c.posY, c.posZ),
+    );
+    const bbox = geometry.boundingBox;
+    const nativeW = bbox ? bbox.max.x - bbox.min.x : 1;
+    group.current.scale.setScalar((v.width * c.widthFit) / nativeW);
+    group.current.position.z = c.posZ;
+
+    // far-plane parallax: drift against the cursor
+    const p = parallax.current;
+    group.current.position.x = THREE.MathUtils.lerp(
+      group.current.position.x,
+      p.x * -c.parallaxAmt,
+      0.05,
+    );
+    group.current.position.y = THREE.MathUtils.lerp(
+      group.current.position.y,
+      c.posY + p.y * c.parallaxAmt * 0.6,
+      0.05,
+    );
+  });
+
+  return (
+    <group ref={group} position={[0, c.posY, c.posZ]}>
+      <mesh geometry={geometry} material={material} />
+    </group>
+  );
+}
+
+/* ---- the globe + orbiting text band ---- */
+
+function TypographyGlobe({ drag, lowPower = false }) {
   const textGroup = useRef(null);
   const globeGroup = useRef(null);
-  const sphereMat = useRef(null);
-  const landMat = useRef(null);
-  const palette = isDark ? THEME.dark : THEME.light;
+  const texScale = lowPower ? 0.5 : 1;
 
-  // Canvas 2D ignores webfonts that have not finished loading, so the first
-  // paint would silently fall back to Helvetica. Track readiness and rebuild
-  // the texture once Space Grotesk is actually available.
+  // Canvas 2D silently falls back to Helvetica if the webfont isn't loaded
+  // yet, so track readiness and rebuild the texture when it arrives.
   const [fontReady, setFontReady] = useState(
     () =>
       typeof document !== "undefined" &&
@@ -591,56 +762,31 @@ function TypographyGlobe({ drag, isDark }) {
     };
   }, [fontReady]);
 
-  // Theme-independent: the material tints it, so it is built exactly once.
-  const landTexture = useMemo(() => createLandTexture(), []);
+  const landTexture = useMemo(() => createLandTexture(texScale), [texScale]);
   useEffect(() => () => landTexture?.dispose(), [landTexture]);
 
-  // Heavy work happens here only, and only when the theme flips or the
-  // webfont arrives.
   const textTexture = useMemo(
-    () => createTextTexture(PARAGRAPH, palette.text),
+    () => createTextTexture(PARAGRAPH, THEME.text, texScale),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [palette.text, fontReady],
+    [fontReady, texScale],
   );
 
   useEffect(() => {
     if (!textTexture) return;
-    // A fresh texture starts at the equator; snap it to wherever the band was
-    // left so flipping the theme never slides the type back down the sphere.
+    // a fresh texture starts at the equator — snap it to the current latitude
     textTexture.offset.y = bandOffset(drag.current.lat);
-    // Dispose the previous one so repeated toggles do not leak GPU memory.
     return () => textTexture.dispose();
   }, [textTexture, drag]);
 
-  useEffect(() => {
-    if (!sphereMat.current) return;
-    gsap.to(sphereMat.current.color, {
-      ...new THREE.Color(palette.sphere),
-      duration: 0.9,
-      ease: "power2.inOut",
-    });
-  }, [palette.sphere]);
-
-  useEffect(() => {
-    if (!landMat.current) return;
-    gsap.to(landMat.current.color, {
-      ...new THREE.Color(palette.land),
-      duration: 0.9,
-      ease: "power2.inOut",
-    });
-  }, [palette.land]);
-
   useFrame((_, delta) => {
-    // Clamp: delta spikes to seconds when a backgrounded tab is refocused,
-    // which would otherwise snap the globe through a full revolution.
+    // clamp delta — refocusing a backgrounded tab would snap a full revolution
     if (globeGroup.current) {
       globeGroup.current.rotation.y += Math.min(delta, 0.1) * GLOBE_SPIN;
     }
 
     if (!textGroup.current) return;
 
-    // Idle drift: nudge the *target*, never the mesh, so drag and auto-spin
-    // feed the exact same easing pipeline.
+    // idle drift nudges the target, never the mesh — same easing as drag
     if (!drag.current.active) drag.current.spin += 0.0022;
 
     if (!Number.isFinite(drag.current.spin)) drag.current.spin = 0;
@@ -653,8 +799,6 @@ function TypographyGlobe({ drag, isDark }) {
       overwrite: true,
     });
 
-    // Same treatment for the climb: the band eases toward its target latitude
-    // instead of tracking the pointer, so it carries the same weight as a spin.
     if (textTexture) {
       gsap.to(textTexture.offset, {
         y: bandOffset(drag.current.lat),
@@ -666,30 +810,34 @@ function TypographyGlobe({ drag, isDark }) {
   });
 
   return (
-    <group rotation={[0, 0, -0.1]} position={[0, 0.42, 0]}>
-      {/* The globe turns on its own tilted axis, independently of the type.
-          Drag still never touches it — only the band responds to the pointer. */}
+    <group rotation={[0, 0, -0.1]} position={[0, -0.3, 0]}>
+      {/* the globe spins on its own tilted axis; drag only moves the band */}
       <group rotation={[0, 0, -AXIAL_TILT]}>
         <group ref={globeGroup}>
           <mesh>
-            <sphereGeometry args={[SPHERE_RADIUS, 96, 96]} />
+            <sphereGeometry
+              args={lowPower ? [SPHERE_RADIUS, 48, 48] : [SPHERE_RADIUS, 96, 96]}
+            />
             <meshStandardMaterial
-              ref={sphereMat}
-              color={palette.sphere}
+              color={THEME.sphere}
               roughness={0.55}
               metalness={0}
             />
           </mesh>
 
-          {/* Landmasses ride just above the ocean sphere so they can carry
-              their own tweened colour without disturbing the sphere's own. */}
+          {/* landmasses ride just above the ocean sphere */}
           {landTexture && (
             <mesh>
-              <sphereGeometry args={[SPHERE_RADIUS + 0.004, 128, 96]} />
+              <sphereGeometry
+                args={
+                  lowPower
+                    ? [SPHERE_RADIUS + 0.004, 64, 48]
+                    : [SPHERE_RADIUS + 0.004, 128, 96]
+                }
+              />
               <meshStandardMaterial
-                ref={landMat}
                 map={landTexture}
-                color={palette.land}
+                color={THEME.land}
                 transparent
                 depthWrite={false}
                 roughness={0.62}
@@ -703,21 +851,19 @@ function TypographyGlobe({ drag, isDark }) {
       {textTexture && (
         <group ref={textGroup}>
           <mesh>
-            {/* A full shell, not a slice: the band's extent is a texture
-                window, which is what lets it slide pole to pole for free. */}
-            <sphereGeometry args={[SHELL_RADIUS, 160, 96]} />
-            {/* Standard, not basic: the type shares the sphere's normals, so it
-                catches the same light and reads as printed into the surface.
-                The emissive pass keeps letters legible past the terminator. */}
+            {/* a full shell — the band is just a texture window that can
+                slide pole to pole */}
+            <sphereGeometry
+              args={lowPower ? [SHELL_RADIUS, 96, 64] : [SHELL_RADIUS, 160, 96]}
+            />
+            {/* emissive keeps the letters legible past the terminator */}
             <meshStandardMaterial
               map={textTexture}
-              emissive={palette.text}
+              emissive={THEME.text}
               emissiveMap={textTexture}
               emissiveIntensity={0.4}
               transparent
-              // FrontSide, not DoubleSide: now that the shell stands off the
-              // sphere, rays through the gap would hit it twice and draw the
-              // far side's mirrored text back over the near side.
+              // FrontSide, or the far side's mirrored text bleeds through
               side={THREE.FrontSide}
               depthWrite={false}
               roughness={0.55}
@@ -730,87 +876,16 @@ function TypographyGlobe({ drag, isDark }) {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Companions — moon, orbit path, star dust                                   */
-/*  Same rules as the globe: colours tween with GSAP on theme flips, motion    */
-/*  is delta-clamped, and nothing here takes pointer input.                    */
-/* -------------------------------------------------------------------------- */
+/* ---- background star dust ---- */
 
-function Moon({ isDark }) {
-  const orbit = useRef(null);
-  const moonMat = useRef(null);
-  const pathMat = useRef(null);
-
-  useEffect(() => {
-    if (moonMat.current) {
-      gsap.to(moonMat.current.color, {
-        ...new THREE.Color(isDark ? "#46464e" : "#d9d4ca"),
-        duration: 0.9,
-        ease: "power2.inOut",
-      });
-    }
-    if (pathMat.current) {
-      gsap.to(pathMat.current.color, {
-        ...new THREE.Color(isDark ? "#f4f4f4" : "#0b0b0b"),
-        duration: 0.9,
-        ease: "power2.inOut",
-      });
-      gsap.to(pathMat.current, {
-        opacity: isDark ? 0.16 : 0.1,
-        duration: 0.9,
-        ease: "power2.inOut",
-      });
-    }
-  }, [isDark]);
-
-  useFrame((_, delta) => {
-    if (orbit.current) orbit.current.rotation.y += Math.min(delta, 0.1) * 0.28;
-  });
-
-  return (
-    /* Shares the globe's centre; the tilt makes the orbit cut in front of the
-       sphere at the bottom and behind it at the top, which is what sells the
-       scene as a volume instead of layered flat cut-outs. */
-    <group position={[0, 0.42, 0]} rotation={[0.46, 0, -0.18]}>
-      <group ref={orbit}>
-        <mesh position={[3.15, 0, 0]}>
-          <sphereGeometry args={[0.17, 48, 48]} />
-          <meshStandardMaterial
-            ref={moonMat}
-            color="#d9d4ca"
-            roughness={0.85}
-            metalness={0}
-          />
-        </mesh>
-      </group>
-
-      {/* The moon's track, drawn as a hairline ring in world space so it
-          foreshortens into an ellipse exactly like the orbit it describes. */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[3.135, 3.155, 180]} />
-        <meshBasicMaterial
-          ref={pathMat}
-          color="#0b0b0b"
-          transparent
-          opacity={0.1}
-          side={THREE.DoubleSide}
-          depthWrite={false}
-        />
-      </mesh>
-    </group>
-  );
-}
-
-function Stars({ isDark }) {
+function Stars({ count = 380 }) {
   const cloud = useRef(null);
-  const mat = useRef(null);
 
   const geometry = useMemo(() => {
-    const COUNT = 380;
+    const COUNT = count;
     const positions = new Float32Array(COUNT * 3);
     for (let i = 0; i < COUNT; i++) {
-      // A wide shell kept strictly behind the globe (z <= -6): dust that
-      // drifted in front of the camera would attenuate into huge blobs.
+      // kept strictly behind the globe — dust near the camera blows up into blobs
       const radius = 6 + Math.random() * 20;
       const theta = Math.random() * Math.PI * 2;
       positions[i * 3] = Math.cos(theta) * radius;
@@ -820,26 +895,11 @@ function Stars({ isDark }) {
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     return g;
-  }, []);
+  }, [count]);
   useEffect(() => () => geometry.dispose(), [geometry]);
 
-  useEffect(() => {
-    if (!mat.current) return;
-    gsap.to(mat.current.color, {
-      ...new THREE.Color(isDark ? "#ffffff" : "#7c766b"),
-      duration: 0.9,
-      ease: "power2.inOut",
-    });
-    gsap.to(mat.current, {
-      opacity: isDark ? 0.75 : 0.35,
-      duration: 0.9,
-      ease: "power2.inOut",
-    });
-  }, [isDark]);
-
   useFrame(({ clock }) => {
-    // A slow sway rather than a spin: rotation stays within a few degrees, so
-    // no point can ever swing around from behind the globe into the camera.
+    // slow sway, not a spin — nothing can swing around into the camera
     if (cloud.current) {
       cloud.current.rotation.y = Math.sin(clock.elapsedTime * 0.05) * 0.06;
     }
@@ -849,12 +909,11 @@ function Stars({ isDark }) {
     <group ref={cloud}>
       <points geometry={geometry}>
         <pointsMaterial
-          ref={mat}
           size={0.06}
           sizeAttenuation
-          color="#7c766b"
+          color="#ffffff"
           transparent
-          opacity={0.35}
+          opacity={0.75}
           depthWrite={false}
         />
       </points>
@@ -862,45 +921,302 @@ function Stars({ isDark }) {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Component                                                                  */
-/* -------------------------------------------------------------------------- */
+/* ---- cursor trail: a comet of pixel dots chasing the pointer ---- */
+
+function CursorTrail() {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    // touch devices have no hovering cursor — skip the whole loop
+    if (window.matchMedia?.("(pointer: coarse)").matches) return;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let raf;
+    let w = 0;
+    let h = 0;
+
+    const resize = () => {
+      w = canvas.width = canvas.offsetWidth;
+      h = canvas.height = canvas.offsetHeight;
+    };
+    resize();
+    window.addEventListener("resize", resize);
+
+    // start far off-canvas so nothing renders until the pointer moves
+    const mouse = { x: -200, y: -200 };
+    const head = { x: -200, y: -200 };
+    const points = [];
+    const MAX_POINTS = 144;
+    const GAP = 4; // px travelled between samples
+    const DECAY = 0.024; // ~0.7s until a sample ages out
+    const onMove = (e) => {
+      const r = canvas.getBoundingClientRect();
+      mouse.x = e.clientX - r.left;
+      mouse.y = e.clientY - r.top;
+    };
+    window.addEventListener("pointermove", onMove);
+
+    const rgb = "200,200,204";
+
+    const draw = () => {
+      raf = requestAnimationFrame(draw);
+      ctx.clearRect(0, 0, w, h);
+
+      // eased follow — the head glides after the pointer with momentum
+      head.x += (mouse.x - head.x) * 0.11;
+      head.y += (mouse.y - head.y) * 0.11;
+
+      // lay samples every GAP px along the path so fast flicks stay a
+      // continuous trail instead of scattered clumps
+      const makeSample = (x, y) => ({ x, y, life: 1 });
+
+      const prev = points[0];
+      if (!prev) {
+        points.unshift(makeSample(head.x, head.y));
+      } else {
+        let dist = Math.hypot(head.x - prev.x, head.y - prev.y);
+        if (dist >= GAP) {
+          const dx = (head.x - prev.x) / dist;
+          const dy = (head.y - prev.y) / dist;
+          let px = prev.x;
+          let py = prev.y;
+          let steps = 0;
+          while (dist >= GAP && steps < MAX_POINTS) {
+            px += dx * GAP;
+            py += dy * GAP;
+            points.unshift(makeSample(px, py));
+            dist -= GAP;
+            steps++;
+          }
+        }
+      }
+      while (points.length > MAX_POINTS) points.pop();
+
+      for (const p of points) p.life -= DECAY;
+      while (points.length && points[points.length - 1].life <= 0) points.pop();
+
+      // Dots live on a fixed checkerboard grid; each sample lights the cells
+      // in its radius and a stable per-cell hash crumbles the rim, so dots
+      // only appear and fade in place — they never shift.
+      const CELL = 3;
+      const DOT = 2.4;
+      const lit = new Map();
+      for (let i = points.length - 1; i >= 0; i--) {
+        const p = points[i];
+        if (p.life <= 0) continue;
+        const shape = 1 - i / MAX_POINTS; // 1 = head, 0 = tail end
+        const radius = 5 + 16 * shape;
+        const alpha = (0.3 + 0.45 * shape) * p.life;
+        const x0 = Math.round((p.x - radius) / CELL);
+        const x1 = Math.round((p.x + radius) / CELL);
+        const y0 = Math.round((p.y - radius) / CELL);
+        const y1 = Math.round((p.y + radius) / CELL);
+        for (let iy = y0; iy <= y1; iy++) {
+          for (let ix = x0; ix <= x1; ix++) {
+            if ((ix + iy) & 1) continue; // checkerboard
+            const cx = ix * CELL;
+            const cy = iy * CELL;
+            const dist = Math.hypot(cx - p.x, cy - p.y);
+            if (dist > radius) continue;
+            // stable hash — the same cell always makes the same keep/skip call
+            const s = Math.sin(ix * 127.1 + iy * 311.7) * 43758.5453;
+            const hsh = s - Math.floor(s);
+            if (hsh > 0.25 + 0.9 * (1 - dist / radius)) continue;
+            const key = `${ix},${iy}`;
+            const prevCell = lit.get(key);
+            if (!prevCell || alpha > prevCell.a)
+              lit.set(key, { cx, cy, a: alpha });
+          }
+        }
+      }
+      for (const { cx, cy, a } of lit.values()) {
+        ctx.fillStyle = `rgba(${rgb},${a})`;
+        ctx.fillRect(cx - DOT / 2, cy - DOT / 2, DOT, DOT);
+      }
+
+      // head core snaps to the same grid and fades with the freshest sample
+      if (points.length) {
+        const hx = Math.round(head.x / CELL) * CELL;
+        const hy = Math.round(head.y / CELL) * CELL;
+        ctx.fillStyle = `rgba(${rgb},${Math.max(points[0].life, 0) * 0.9})`;
+        ctx.fillRect(hx - DOT, hy - DOT, DOT * 2, DOT * 2);
+      }
+    };
+    raf = requestAnimationFrame(draw);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      window.removeEventListener("pointermove", onMove);
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden
+      className="pointer-events-none absolute inset-0 z-50 h-full w-full"
+    />
+  );
+}
+
+/* ---- chrome ---- */
+
+// "+" registration mark used on the hero frame corners.
+function Cross({ className }) {
+  return (
+    <span
+      aria-hidden
+      className={`pointer-events-none absolute block h-[9px] w-[9px] ${className}`}
+    >
+      <span className="absolute top-1/2 left-0 h-px w-full bg-white" />
+      <span className="absolute left-1/2 top-0 h-full w-px bg-white" />
+    </span>
+  );
+}
+
+/* Scramble hover: on pointer enter the label churns through random glyphs
+   and resolves left-to-right back into the real text. The scramble pool is
+   the same uppercase set the chrome uses, so mid-animation frames still look
+   like instrument readouts rather than noise. */
+const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#/\\<>";
+
+function useScramble(text) {
+  const [display, setDisplay] = useState(text);
+  const timer = useRef(null);
+  useEffect(() => setDisplay(text), [text]);
+  useEffect(() => () => clearInterval(timer.current), []);
+
+  const scramble = useCallback(() => {
+    const frames = Math.max(text.length * 2, 10);
+    let frame = 0;
+    clearInterval(timer.current);
+    timer.current = setInterval(() => {
+      frame++;
+      const reveal = Math.floor((frame / frames) * text.length);
+      let out = "";
+      for (let i = 0; i < text.length; i++) {
+        out +=
+          i < reveal || text[i] === " "
+            ? text[i]
+            : SCRAMBLE_CHARS[(Math.random() * SCRAMBLE_CHARS.length) | 0];
+      }
+      if (frame >= frames) {
+        clearInterval(timer.current);
+        out = text;
+      }
+      setDisplay(out);
+    }, 28);
+  }, [text]);
+
+  return [display, scramble];
+}
+
+/* Panel button in the instrument-panel frame. Hover is the scramble alone —
+   no fill wipe, no rolling label. */
+function PanelButton({
+  active = false,
+  onClick,
+  ariaLabel,
+  className = "",
+  padClass = "px-5 py-2",
+  endSlot = null,
+  children,
+}) {
+  const [display, scramble] = useScramble(String(children));
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={ariaLabel}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerEnter={scramble}
+      className={`relative flex cursor-pointer items-stretch overflow-hidden border border-[#9fc0f0]/40 text-[11px] font-medium uppercase tracking-[0.24em] backdrop-blur-sm transition-colors duration-300 ${
+        active ? "bg-[#cfe0fa] text-black" : "text-[#dce8fb]"
+      } ${className}`}
+    >
+      {/* whitespace-pre keeps the width steady while glyphs churn */}
+      <span className={`relative block whitespace-pre ${padClass}`}>
+        {display}
+      </span>
+      {endSlot && (
+        <span className="relative flex items-stretch">{endSlot}</span>
+      )}
+    </button>
+  );
+}
+
+/* One entry of the dropdown: index, scrambling label, brief, and an arrow.
+   Hover is the label scramble only — the row itself stays still. */
+function MenuRow({ index, label, desc, active = false, onClick }) {
+  const [display, scramble] = useScramble(label);
+
+  return (
+    <button
+      type="button"
+      data-menu-row
+      onClick={onClick}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerEnter={scramble}
+      className={`flex w-full cursor-pointer items-baseline gap-4 px-5 py-4 text-left ${
+        active ? "bg-[#cfe0fa] text-black" : "text-[#dce8fb]"
+      }`}
+    >
+      <span
+        className={`text-[10px] tracking-[0.28em] tabular-nums ${
+          active ? "text-black/45" : "text-[#9fc0f0]/60"
+        }`}
+      >
+        {String(index + 1).padStart(2, "0")}
+      </span>
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="whitespace-pre text-[13px] font-medium uppercase tracking-[0.24em]">
+          {display}
+        </span>
+        <span
+          className={`text-[10px] uppercase tracking-[0.18em] ${
+            active ? "text-black/50" : "text-[#9fc0f0]/55"
+          }`}
+        >
+          {desc}
+        </span>
+      </span>
+      <span aria-hidden className="text-[11px]">
+        →
+      </span>
+    </button>
+  );
+}
 
 export default function TextSphere() {
-  const [isDark, setIsDark] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [isOverGlobe, setIsOverGlobe] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  // One-shot capability probe: phones and tablets get the same scene at a
+  // lower simulation cost — fewer segments, smaller textures, capped DPR and
+  // no transmission pass — so the animation stays fluid on mobile GPUs.
+  const [lowPower] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 820px), (pointer: coarse)").matches,
+  );
   const shellRef = useRef(null);
-  const lightRef = useRef(null);
-  const darkRef = useRef(null);
-  const wordmarkRef = useRef(null);
-  const ringsRef = useRef(null);
-  const parallaxFns = useRef(null);
 
   // Drag targets live in a ref: they are written at pointer rate and read at
   // frame rate, so they must never trigger a React re-render. `spin` is the
   // band's rotation around the globe, `lat` its climb from pole to pole.
   const drag = useRef({ spin: 0, lat: 0, active: false, px: 0, py: 0 });
 
-  const palette = isDark ? THEME.dark : THEME.light;
-  const ink = isDark ? "text-white" : "text-black";
-  const rule = isDark ? "border-white/12" : "border-black/12";
-  const muted = isDark ? "text-white/45" : "text-black/45";
-
-  /* Two stacked backdrops cross-faded rather than one colour tweened: a
-     gradient has no single value to interpolate, and opacity is GPU-cheap. */
-  useEffect(() => {
-    if (!lightRef.current || !darkRef.current) return;
-    gsap.to(lightRef.current, {
-      opacity: isDark ? 0 : 1,
-      duration: 0.9,
-      ease: "power2.inOut",
-    });
-    gsap.to(darkRef.current, {
-      opacity: isDark ? 1 : 0,
-      duration: 0.9,
-      ease: "power2.inOut",
-    });
-  }, [isDark]);
+  // Normalised cursor offset (-0.5..0.5) for the wordmark's far-plane drift;
+  // read per-frame inside the Canvas, so it must never re-render React.
+  const parallax = useRef({ x: 0, y: 0 });
 
   /* Entrance. Scoped to the section so the selector can never escape it, and
      reverted on unmount so Fast Refresh cannot stack duplicate timelines. */
@@ -918,57 +1234,110 @@ export default function TextSphere() {
     return () => ctx.revert();
   }, []);
 
-  /* Cursor parallax: the wordmark and the ring stack drift at different rates
-     and in opposite directions, so the flat background layers separate into
-     depth planes the moment the pointer moves. quickTo reuses one tween per
-     property, which keeps this cheap at pointer-event rate. */
+  /* Menu open/close: the panel drops in and its rows cascade; closing lifts
+     it away quickly. The nav stays mounted so the tween can run both ways —
+     autoAlpha handles visibility, pointer events follow the state. */
   useEffect(() => {
-    if (!wordmarkRef.current || !ringsRef.current) return;
-    const opts = { duration: 1.2, ease: "power3.out" };
-    parallaxFns.current = {
-      wx: gsap.quickTo(wordmarkRef.current, "x", opts),
-      wy: gsap.quickTo(wordmarkRef.current, "y", opts),
-      rx: gsap.quickTo(ringsRef.current, "x", opts),
-      ry: gsap.quickTo(ringsRef.current, "y", opts),
-    };
-  }, []);
+    const el = menuRef.current;
+    if (!el) return;
+    const rows = el.querySelectorAll("[data-menu-row]");
+    if (menuOpen) {
+      el.style.pointerEvents = "auto";
+      gsap
+        .timeline()
+        .to(
+          el,
+          {
+            autoAlpha: 1,
+            y: 0,
+            duration: 0.45,
+            ease: "power3.out",
+            overwrite: "auto",
+          },
+          0,
+        )
+        .fromTo(
+          rows,
+          { y: 16, opacity: 0 },
+          {
+            y: 0,
+            opacity: 1,
+            duration: 0.4,
+            ease: "power3.out",
+            stagger: 0.05,
+            overwrite: "auto",
+          },
+          0.05,
+        );
+    } else {
+      el.style.pointerEvents = "none";
+      gsap.to(el, {
+        autoAlpha: 0,
+        y: -12,
+        duration: 0.28,
+        ease: "power2.in",
+        overwrite: "auto",
+      });
+    }
+  }, [menuOpen]);
 
+  /* Cursor parallax: the 3D wordmark drifts against the cursor, separating
+     the far plane from the globe the moment the pointer moves. Only the
+     target is written here — LiquidWordmark eases toward it per frame. */
   const onParallax = useCallback((e) => {
-    const p = parallaxFns.current;
-    if (!p) return;
-    const nx = e.clientX / window.innerWidth - 0.5;
-    const ny = e.clientY / window.innerHeight - 0.5;
-    p.wx(nx * -34); // far plane: moves against the cursor
-    p.wy(ny * -22);
-    p.rx(nx * 18); // near plane: moves with it
-    p.ry(ny * 12);
+    parallax.current.x = e.clientX / window.innerWidth - 0.5;
+    parallax.current.y = e.clientY / window.innerHeight - 0.5;
   }, []);
 
-  const onPointerDown = useCallback((e) => {
-    drag.current.active = true;
-    drag.current.px = e.clientX;
-    drag.current.py = e.clientY;
-    setIsDragging(true);
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+  /* Screen-space hit test for the globe, derived from the camera setup
+     (z=8.6, fov 42): the visible half-height is 8.6*tan(21°) ≈ 3.30 world
+     units, the globe centre sits 0.3 down, and the shell radius is ~1.7 — so
+     the globe occupies a circle of ~26% of the viewport height, ~4.5% below
+     centre. Dragging the band only works inside it. */
+  const overGlobe = useCallback((e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2 + 0.045 * r.height;
+    const radius = 0.27 * r.height;
+    const dx = e.clientX - cx;
+    const dy = e.clientY - cy;
+    return dx * dx + dy * dy <= radius * radius;
   }, []);
 
-  const onPointerMove = useCallback((e) => {
-    if (!drag.current.active) return;
-    const dx = e.clientX - drag.current.px;
-    const dy = e.clientY - drag.current.py;
-    drag.current.px = e.clientX;
-    drag.current.py = e.clientY;
+  const onPointerDown = useCallback(
+    (e) => {
+      if (!overGlobe(e)) return;
+      drag.current.active = true;
+      drag.current.px = e.clientX;
+      drag.current.py = e.clientY;
+      setIsDragging(true);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    },
+    [overGlobe],
+  );
 
-    // Sideways carries the band around the globe. Vertical walks it up toward
-    // the north pole and down toward the south, clamped at the point where the
-    // band's edge meets a pole so the type never collapses through it.
-    drag.current.spin += dx * 0.006;
-    drag.current.lat = THREE.MathUtils.clamp(
-      drag.current.lat - dy * 0.004,
-      -MAX_LAT,
-      MAX_LAT,
-    );
-  }, []);
+  const onPointerMove = useCallback(
+    (e) => {
+      // The grab cursor only appears over the globe itself.
+      setIsOverGlobe(overGlobe(e));
+      if (!drag.current.active) return;
+      const dx = e.clientX - drag.current.px;
+      const dy = e.clientY - drag.current.py;
+      drag.current.px = e.clientX;
+      drag.current.py = e.clientY;
+
+      // Sideways carries the band around the globe. Vertical walks it up toward
+      // the north pole and down toward the south, clamped at the point where the
+      // band's edge meets a pole so the type never collapses through it.
+      drag.current.spin += dx * 0.006;
+      drag.current.lat = THREE.MathUtils.clamp(
+        drag.current.lat - dy * 0.004,
+        -MAX_LAT,
+        MAX_LAT,
+      );
+    },
+    [overGlobe],
+  );
 
   const endDrag = useCallback((e) => {
     if (!drag.current.active) return;
@@ -981,22 +1350,13 @@ export default function TextSphere() {
     <section
       ref={shellRef}
       className="relative h-screen w-full overflow-hidden select-none"
-      style={{ backgroundColor: palette.base }}
+      style={{ backgroundColor: THEME.base }}
       onPointerMove={onParallax}
     >
       {/* ---------------------------------------------------------------- */}
-      {/*  Backdrop stack                                                   */}
+      {/*  Backdrop                                                         */}
       {/* ---------------------------------------------------------------- */}
-      <div
-        ref={lightRef}
-        className="absolute inset-0"
-        style={{ background: THEME.light.backdrop, opacity: isDark ? 0 : 1 }}
-      />
-      <div
-        ref={darkRef}
-        className="absolute inset-0"
-        style={{ background: THEME.dark.backdrop, opacity: isDark ? 1 : 0 }}
-      />
+      <div className="absolute inset-0" style={{ background: THEME.backdrop }} />
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.15] mix-blend-overlay"
         style={{ backgroundImage: `url("${GRAIN}")` }}
@@ -1006,92 +1366,26 @@ export default function TextSphere() {
           which is what gives the composition depth instead of a floating ball.
           The ref is the parallax handle: GSAP translates this wrapper, so the
           span inside stays free for the entrance reveal. */}
-      <div
-        ref={wordmarkRef}
-        className="pointer-events-none absolute inset-0 flex items-center justify-center"
-      >
-        <span
-          data-reveal
-          className={`-translate-y-[7vh] whitespace-nowrap text-[26vw] leading-none font-semibold tracking-[-0.05em] ${
-            isDark ? "text-white/[0.07]" : "text-black/[0.06]"
-          }`}
-        >
-          EARTH
-        </span>
-      </div>
-
-      {/* Concentric survey rings between the wordmark and the globe. Flat SVG,
-          but parallaxed against the wordmark so the two planes separate. */}
-      <div
-        ref={ringsRef}
-        className="pointer-events-none absolute inset-0 flex items-center justify-center"
-      >
-        <svg
-          data-reveal
-          viewBox="0 0 100 100"
-          fill="none"
-          className={`h-[160vmin] w-[160vmin] shrink-0 -translate-y-[6vh] transition-colors duration-700 ${
-            isDark ? "text-white/[0.09]" : "text-black/[0.09]"
-          }`}
-        >
-          <circle cx="50" cy="50" r="21" stroke="currentColor" strokeWidth="0.07" />
-          <circle
-            cx="50"
-            cy="50"
-            r="28"
-            stroke="currentColor"
-            strokeWidth="0.07"
-            strokeDasharray="0.7 1.5"
-          />
-          <circle cx="50" cy="50" r="36" stroke="currentColor" strokeWidth="0.07" />
-          <circle
-            cx="50"
-            cy="50"
-            r="45"
-            stroke="currentColor"
-            strokeWidth="0.07"
-            strokeDasharray="0.2 1.2"
-          />
-          {/* Tick marks on the outer ring, like a survey dial. */}
-          {Array.from({ length: 24 }, (_, i) => {
-            const a = (i / 24) * Math.PI * 2;
-            const x1 = 50 + Math.cos(a) * 44;
-            const y1 = 50 + Math.sin(a) * 44;
-            const x2 = 50 + Math.cos(a) * 46;
-            const y2 = 50 + Math.sin(a) * 46;
-            return (
-              <line
-                key={i}
-                x1={x1}
-                y1={y1}
-                x2={x2}
-                y2={y2}
-                stroke="currentColor"
-                strokeWidth="0.09"
-              />
-            );
-          })}
-        </svg>
-      </div>
+      {/* The EARTH wordmark now lives inside the Canvas as real extruded
+          geometry (LiquidWordmark) so the sphere eclipses it in true depth. */}
 
       {/* Depth vignette: gently darkened corners curve the backdrop away from
           the viewer, so the flat washes read as a space instead of a wall. */}
       <div
-        className="pointer-events-none absolute inset-0 transition-opacity duration-700"
+        className="pointer-events-none absolute inset-0"
         style={{
           background:
             "radial-gradient(125% 105% at 50% 42%, transparent 55%, rgba(8,8,10,0.38) 100%)",
-          opacity: isDark ? 0.9 : 0.35,
+          opacity: 0.9,
         }}
       />
 
       {/* Contact shadow: grounds the sphere so it reads as lit, not pasted. */}
       <div
-        className="pointer-events-none absolute left-1/2 top-[54%] h-[26vmin] w-[50vmin] -translate-x-1/2 blur-3xl"
+        className="pointer-events-none absolute left-1/2 top-[65%] h-[26vmin] w-[50vmin] -translate-x-1/2 blur-3xl"
         style={{
-          background: isDark
-            ? "radial-gradient(50% 50% at 50% 50%, rgba(0,0,0,0.55), transparent 70%)"
-            : "radial-gradient(50% 50% at 50% 50%, rgba(90,84,74,0.22), transparent 70%)",
+          background:
+            "radial-gradient(50% 50% at 50% 50%, rgba(0,0,0,0.55), transparent 70%)",
         }}
       />
 
@@ -1101,31 +1395,28 @@ export default function TextSphere() {
       <div
         data-stage
         className={`absolute inset-0 touch-none ${
-          isDragging ? "cursor-grabbing" : "cursor-grab"
+          isDragging ? "cursor-grabbing" : isOverGlobe ? "cursor-grab" : ""
         }`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
-        onPointerLeave={endDrag}
+        onPointerLeave={(e) => {
+          endDrag(e);
+          setIsOverGlobe(false);
+        }}
         onPointerCancel={endDrag}
       >
         <Canvas
-          dpr={[1, 2]}
+          dpr={lowPower ? [1, 1.5] : [1, 2]}
           camera={{ position: [0, 0, 8.6], fov: 42 }}
           gl={{ antialias: true, alpha: true }}
         >
-          <ambientLight intensity={isDark ? 0.6 : 1.2} />
-          <directionalLight
-            position={[3, 5, 6]}
-            intensity={isDark ? 1.1 : 1.8}
-          />
-          <directionalLight
-            position={[-6, -2, 2]}
-            intensity={isDark ? 0.7 : 0.5}
-          />
-          <Stars isDark={isDark} />
-          <TypographyGlobe drag={drag} isDark={isDark} />
-          <Moon isDark={isDark} />
+          <ambientLight intensity={0.6} />
+          <directionalLight position={[3, 5, 6]} intensity={1.1} />
+          <directionalLight position={[-6, -2, 2]} intensity={0.7} />
+          <Stars count={lowPower ? 200 : 380} />
+          <LiquidWordmark parallax={parallax} lowPower={lowPower} />
+          <TypographyGlobe drag={drag} lowPower={lowPower} />
         </Canvas>
       </div>
 
@@ -1133,107 +1424,155 @@ export default function TextSphere() {
       {/*  Chrome — inert by default so it never steals the drag            */}
       {/* ---------------------------------------------------------------- */}
       <div
-        className={`pointer-events-none absolute inset-0 flex flex-col justify-between p-6 transition-colors duration-700 sm:p-10 ${ink}`}
+        className="pointer-events-none absolute inset-0 flex flex-col justify-between p-6 text-white sm:p-8"
       >
-        <header className="flex items-start justify-between gap-6">
-          <div data-reveal className="flex items-center gap-3">
-            <span
-              className={`inline-block h-[7px] w-[7px] rounded-full ${
-                isDark ? "bg-white" : "bg-black"
-              }`}
-            />
-            <span className="text-[11px] font-medium uppercase tracking-[0.32em]">
-              Terra Atlas
+        <header className="relative flex items-start justify-between gap-6">
+          {/* Logo in the same instrument-panel frame as the toggle: solid
+              glyph block, label, and the corner registration mark. */}
+          <div
+            data-reveal
+            className="relative flex items-stretch border border-[#9fc0f0]/40 text-[11px] font-medium uppercase tracking-[0.24em] text-[#dce8fb] backdrop-blur-sm"
+          >
+            <span className="flex w-9 items-center justify-center bg-[#cfe0fa]">
+              {/* Planet-and-orbit glyph — the moon ring from the scene, in miniature. */}
+              <svg
+                viewBox="0 0 14 14"
+                fill="none"
+                aria-hidden
+                className="h-3.5 w-3.5 text-black"
+              >
+                <circle cx="7" cy="7" r="3" fill="currentColor" />
+                <ellipse
+                  cx="7"
+                  cy="7"
+                  rx="6.2"
+                  ry="2.1"
+                  stroke="currentColor"
+                  strokeWidth="0.9"
+                  transform="rotate(-18 7 7)"
+                />
+              </svg>
             </span>
+            <span className="px-4 py-2">Terra Atlas</span>
           </div>
 
-          <div data-reveal className="flex items-center gap-5">
-            {/* Instrument-panel button: hard-cornered frame, label, solid
-                switch block, and a survey crosshair kissing the top-left corner. */}
-            <button
-              type="button"
-              onClick={() => setIsDark((v) => !v)}
-              onPointerDown={(e) => e.stopPropagation()}
-              aria-label={
-                isDark ? "Switch to light mode" : "Switch to dark mode"
+          {/* Right-side balance for the logo: the menu control in the same
+              instrument-panel frame; the section nav lives in its dropdown. */}
+          <div data-reveal className="relative flex flex-col items-end gap-2.5">
+            <PanelButton
+              active={menuOpen}
+              onClick={() => setMenuOpen((v) => !v)}
+              ariaLabel={menuOpen ? "Close menu" : "Open menu"}
+              className="pointer-events-auto"
+              padClass="px-4 py-2"
+              /* Hamburger that folds into a cross: both lines sit on the
+                 block's centre and only rotate/offset, so the morph is a
+                 pure transform tween. */
+              endSlot={
+                <span
+                  className={`relative block w-9 transition-colors duration-300 ${
+                    menuOpen ? "bg-black" : "bg-[#cfe0fa]"
+                  }`}
+                >
+                  <span
+                    className={`absolute left-1/2 top-1/2 h-[2px] w-3.5 -translate-x-1/2 transition-all duration-300 ease-out ${
+                      menuOpen
+                        ? "-translate-y-1/2 rotate-45 bg-[#dce8fb]"
+                        : "-translate-y-[3.5px] bg-black"
+                    }`}
+                  />
+                  <span
+                    className={`absolute left-1/2 top-1/2 h-[2px] w-3.5 -translate-x-1/2 transition-all duration-300 ease-out ${
+                      menuOpen
+                        ? "-translate-y-1/2 -rotate-45 bg-[#dce8fb]"
+                        : "translate-y-[1.5px] bg-black"
+                    }`}
+                  />
+                </span>
               }
-              className={`pointer-events-auto relative flex cursor-pointer items-stretch border text-[11px] font-medium uppercase tracking-[0.24em] backdrop-blur-sm transition-colors duration-300 ${
-                isDark
-                  ? "border-white/30 text-white hover:bg-white/10"
-                  : "border-black/25 text-black hover:bg-black/[0.06]"
-              }`}
             >
-              <span
-                aria-hidden
-                className="absolute -top-[5px] -left-[5px] block h-[9px] w-[9px]"
-              >
-                <span
-                  className={`absolute top-1/2 left-0 h-px w-full ${
-                    isDark ? "bg-white" : "bg-black"
-                  }`}
+              Menu
+            </PanelButton>
+
+            {/* Dropdown index — one framed panel under the control, right-
+                bound to it: every section with its number and one-line brief,
+                separated by hairlines. Always mounted; GSAP slides it in and
+                cascades the rows. Picking one closes the menu. */}
+            <nav
+              ref={menuRef}
+              aria-label="Sections"
+              aria-hidden={!menuOpen}
+              style={{ opacity: 0, visibility: "hidden" }}
+              className="pointer-events-none absolute right-0 top-full mt-2.5 w-[21rem] max-w-[calc(100vw-3rem)] divide-y divide-[#9fc0f0]/15 border border-[#9fc0f0]/40 bg-[#0a0f18]/70 backdrop-blur-md"
+            >
+              {MENU_ITEMS.map((item, i) => (
+                <MenuRow
+                  key={item.label}
+                  index={i}
+                  label={item.label}
+                  desc={item.desc}
+                  active={i === 0}
+                  onClick={() => setMenuOpen(false)}
                 />
-                <span
-                  className={`absolute left-1/2 top-0 h-full w-px ${
-                    isDark ? "bg-white" : "bg-black"
-                  }`}
-                />
-              </span>
-              <span className="px-4 py-2">{isDark ? "Light" : "Dark"}</span>
-              <span
-                className={`flex w-9 flex-col items-center justify-center gap-[3px] ${
-                  isDark ? "bg-white" : "bg-black"
-                }`}
-              >
-                <span
-                  className={`h-[2px] w-3.5 ${isDark ? "bg-black" : "bg-white"}`}
-                />
-                <span
-                  className={`h-[2px] w-3.5 ${isDark ? "bg-black" : "bg-white"}`}
-                />
-              </span>
-            </button>
+              ))}
+            </nav>
           </div>
         </header>
 
         <footer className="flex flex-col gap-7">
           <div
             data-reveal
-            className={`flex items-center justify-center gap-2 text-[11px] uppercase tracking-[0.28em] ${muted}`}
+            className="flex items-center justify-center gap-2 text-[11px] uppercase tracking-[0.28em] text-white/45"
           >
             <span aria-hidden>↕</span>
             Drag to move the text
           </div>
 
-          <dl
-            className={`grid grid-cols-2 gap-y-6 border-t pt-6 sm:grid-cols-4 ${rule}`}
-          >
-            {STATS.map((s) => (
-              <div data-reveal key={s.label} className="flex flex-col gap-1.5">
-                <dt
-                  className={`text-[10px] uppercase tracking-[0.28em] ${muted}`}
+          <div className="relative border-t border-white/12 pt-6">
+            {/* Justified, not a 4-col grid: equal gaps between neighbours, with
+                the first and last columns bound to the frame edges. */}
+            <dl className="grid grid-cols-2 gap-y-6 sm:flex sm:justify-between">
+              {STATS.map((s, i) => (
+                <div
+                  data-reveal
+                  key={s.label}
+                  className={`flex flex-col gap-1.5 ${
+                    // The row closes flush at both frame edges: first column
+                    // left-bound, last column right-bound, like the rule above.
+                    i === STATS.length - 1 ? "items-end text-right" : ""
+                  }`}
                 >
-                  {s.label}
-                </dt>
-                <dd className="flex items-baseline gap-1.5">
-                  <span className="text-2xl font-medium tracking-tight tabular-nums sm:text-[28px]">
-                    {s.value}
-                  </span>
-                  <span className={`text-[11px] tracking-wide ${muted}`}>
-                    {s.unit}
-                  </span>
-                </dd>
-              </div>
-            ))}
-          </dl>
+                  <dt
+                    className="text-[10px] uppercase tracking-[0.28em] text-white/45"
+                  >
+                    {s.label}
+                  </dt>
+                  <dd className="flex items-baseline gap-1.5">
+                    <span className="text-lg font-medium tracking-tight tabular-nums sm:text-xl">
+                      {s.value}
+                    </span>
+                    <span className="text-[11px] tracking-wide text-white/45">
+                      {s.unit}
+                    </span>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
         </footer>
       </div>
 
-      {/* Hairline frame — the detail that makes it read as a composed section. */}
-      <div
-        className={`pointer-events-none absolute inset-3 rounded-[3px] border sm:inset-5 ${
-          isDark ? "border-white/[0.07]" : "border-black/[0.07]"
-        }`}
-      />
+      {/* Hero frame — one hard-cornered hairline around the whole section,
+          pinned with the same registration marks as the buttons. */}
+      <div className="pointer-events-none absolute inset-1.5 border border-white/20 sm:inset-3">
+        <Cross className="-top-[5px] -left-[5px]" />
+        <Cross className="-top-[5px] -right-[5px]" />
+        <Cross className="-bottom-[5px] -left-[5px]" />
+        <Cross className="-bottom-[5px] -right-[5px]" />
+      </div>
+
+      {/* Comet cursor — topmost layer, never intercepts input. */}
+      <CursorTrail />
     </section>
   );
 }
