@@ -1079,10 +1079,8 @@ function Cross({ className }) {
   );
 }
 
-/* Scramble hover: on pointer enter the label churns through random glyphs
-   and resolves left-to-right back into the real text. The scramble pool is
-   the same uppercase set the chrome uses, so mid-animation frames still look
-   like instrument readouts rather than noise. */
+// Hover effect: the label churns through random glyphs and resolves
+// left-to-right back into the real text.
 const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#/\\<>";
 
 function useScramble(text) {
@@ -1116,8 +1114,6 @@ function useScramble(text) {
   return [display, scramble];
 }
 
-/* Panel button in the instrument-panel frame. Hover is the scramble alone —
-   no fill wipe, no rolling label. */
 function PanelButton({
   active = false,
   onClick,
@@ -1151,8 +1147,6 @@ function PanelButton({
   );
 }
 
-/* One entry of the dropdown: index, scrambling label, brief, and an arrow.
-   Hover is the label scramble only — the row itself stays still. */
 function MenuRow({ index, label, desc, active = false, onClick }) {
   const [display, scramble] = useScramble(label);
 
@@ -1199,9 +1193,8 @@ export default function TextSphere() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
 
-  // One-shot capability probe: phones and tablets get the same scene at a
-  // lower simulation cost — fewer segments, smaller textures, capped DPR and
-  // no transmission pass — so the animation stays fluid on mobile GPUs.
+  // Phones get the same scene at lower cost: fewer segments, smaller
+  // textures, capped DPR, no transmission pass.
   const [lowPower] = useState(
     () =>
       typeof window !== "undefined" &&
@@ -1209,17 +1202,12 @@ export default function TextSphere() {
   );
   const shellRef = useRef(null);
 
-  // Drag targets live in a ref: they are written at pointer rate and read at
-  // frame rate, so they must never trigger a React re-render. `spin` is the
-  // band's rotation around the globe, `lat` its climb from pole to pole.
+  // Written at pointer rate, read at frame rate — refs so they never
+  // trigger a React re-render.
   const drag = useRef({ spin: 0, lat: 0, active: false, px: 0, py: 0 });
-
-  // Normalised cursor offset (-0.5..0.5) for the wordmark's far-plane drift;
-  // read per-frame inside the Canvas, so it must never re-render React.
   const parallax = useRef({ x: 0, y: 0 });
 
-  /* Entrance. Scoped to the section so the selector can never escape it, and
-     reverted on unmount so Fast Refresh cannot stack duplicate timelines. */
+  // entrance reveal
   useEffect(() => {
     const ctx = gsap.context(() => {
       gsap
@@ -1234,9 +1222,8 @@ export default function TextSphere() {
     return () => ctx.revert();
   }, []);
 
-  /* Menu open/close: the panel drops in and its rows cascade; closing lifts
-     it away quickly. The nav stays mounted so the tween can run both ways —
-     autoAlpha handles visibility, pointer events follow the state. */
+  // Menu open/close. The nav stays mounted so the tween can run both ways;
+  // autoAlpha handles visibility.
   useEffect(() => {
     const el = menuRef.current;
     if (!el) return;
@@ -1281,19 +1268,14 @@ export default function TextSphere() {
     }
   }, [menuOpen]);
 
-  /* Cursor parallax: the 3D wordmark drifts against the cursor, separating
-     the far plane from the globe the moment the pointer moves. Only the
-     target is written here — LiquidWordmark eases toward it per frame. */
+  // Only the target is written here — LiquidWordmark eases toward it.
   const onParallax = useCallback((e) => {
     parallax.current.x = e.clientX / window.innerWidth - 0.5;
     parallax.current.y = e.clientY / window.innerHeight - 0.5;
   }, []);
 
-  /* Screen-space hit test for the globe, derived from the camera setup
-     (z=8.6, fov 42): the visible half-height is 8.6*tan(21°) ≈ 3.30 world
-     units, the globe centre sits 0.3 down, and the shell radius is ~1.7 — so
-     the globe occupies a circle of ~26% of the viewport height, ~4.5% below
-     centre. Dragging the band only works inside it. */
+  // Screen-space hit test for the globe, derived from the camera setup —
+  // it covers ~26% of the viewport height, ~4.5% below centre.
   const overGlobe = useCallback((e) => {
     const r = e.currentTarget.getBoundingClientRect();
     const cx = r.left + r.width / 2;
@@ -1326,9 +1308,7 @@ export default function TextSphere() {
       drag.current.px = e.clientX;
       drag.current.py = e.clientY;
 
-      // Sideways carries the band around the globe. Vertical walks it up toward
-      // the north pole and down toward the south, clamped at the point where the
-      // band's edge meets a pole so the type never collapses through it.
+      // sideways spins the band; vertical walks it between the poles
       drag.current.spin += dx * 0.006;
       drag.current.lat = THREE.MathUtils.clamp(
         drag.current.lat - dy * 0.004,
@@ -1353,24 +1333,14 @@ export default function TextSphere() {
       style={{ backgroundColor: THEME.base }}
       onPointerMove={onParallax}
     >
-      {/* ---------------------------------------------------------------- */}
-      {/*  Backdrop                                                         */}
-      {/* ---------------------------------------------------------------- */}
+      {/* backdrop + grain */}
       <div className="absolute inset-0" style={{ background: THEME.backdrop }} />
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.15] mix-blend-overlay"
         style={{ backgroundImage: `url("${GRAIN}")` }}
       />
 
-      {/* Oversized wordmark sitting behind the globe — the sphere eclipses it,
-          which is what gives the composition depth instead of a floating ball.
-          The ref is the parallax handle: GSAP translates this wrapper, so the
-          span inside stays free for the entrance reveal. */}
-      {/* The EARTH wordmark now lives inside the Canvas as real extruded
-          geometry (LiquidWordmark) so the sphere eclipses it in true depth. */}
-
-      {/* Depth vignette: gently darkened corners curve the backdrop away from
-          the viewer, so the flat washes read as a space instead of a wall. */}
+      {/* depth vignette */}
       <div
         className="pointer-events-none absolute inset-0"
         style={{
@@ -1380,7 +1350,7 @@ export default function TextSphere() {
         }}
       />
 
-      {/* Contact shadow: grounds the sphere so it reads as lit, not pasted. */}
+      {/* contact shadow under the globe */}
       <div
         className="pointer-events-none absolute left-1/2 top-[65%] h-[26vmin] w-[50vmin] -translate-x-1/2 blur-3xl"
         style={{
@@ -1389,9 +1359,7 @@ export default function TextSphere() {
         }}
       />
 
-      {/* ---------------------------------------------------------------- */}
-      {/*  Stage — the only layer that takes pointer input                  */}
-      {/* ---------------------------------------------------------------- */}
+      {/* stage — the only layer that takes pointer input */}
       <div
         data-stage
         className={`absolute inset-0 touch-none ${
@@ -1420,21 +1388,14 @@ export default function TextSphere() {
         </Canvas>
       </div>
 
-      {/* ---------------------------------------------------------------- */}
-      {/*  Chrome — inert by default so it never steals the drag            */}
-      {/* ---------------------------------------------------------------- */}
-      <div
-        className="pointer-events-none absolute inset-0 flex flex-col justify-between p-6 text-white sm:p-8"
-      >
+      {/* chrome — inert by default so it never steals the drag */}
+      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-6 text-white sm:p-8">
         <header className="relative flex items-start justify-between gap-6">
-          {/* Logo in the same instrument-panel frame as the toggle: solid
-              glyph block, label, and the corner registration mark. */}
           <div
             data-reveal
             className="relative flex items-stretch border border-[#9fc0f0]/40 text-[11px] font-medium uppercase tracking-[0.24em] text-[#dce8fb] backdrop-blur-sm"
           >
             <span className="flex w-9 items-center justify-center bg-[#cfe0fa]">
-              {/* Planet-and-orbit glyph — the moon ring from the scene, in miniature. */}
               <svg
                 viewBox="0 0 14 14"
                 fill="none"
@@ -1456,8 +1417,6 @@ export default function TextSphere() {
             <span className="px-4 py-2">Terra Atlas</span>
           </div>
 
-          {/* Right-side balance for the logo: the menu control in the same
-              instrument-panel frame; the section nav lives in its dropdown. */}
           <div data-reveal className="relative flex flex-col items-end gap-2.5">
             <PanelButton
               active={menuOpen}
@@ -1465,9 +1424,7 @@ export default function TextSphere() {
               ariaLabel={menuOpen ? "Close menu" : "Open menu"}
               className="pointer-events-auto"
               padClass="px-4 py-2"
-              /* Hamburger that folds into a cross: both lines sit on the
-                 block's centre and only rotate/offset, so the morph is a
-                 pure transform tween. */
+              // hamburger lines fold into a cross when the menu is open
               endSlot={
                 <span
                   className={`relative block w-9 transition-colors duration-300 ${
@@ -1494,10 +1451,7 @@ export default function TextSphere() {
               Menu
             </PanelButton>
 
-            {/* Dropdown index — one framed panel under the control, right-
-                bound to it: every section with its number and one-line brief,
-                separated by hairlines. Always mounted; GSAP slides it in and
-                cascades the rows. Picking one closes the menu. */}
+            {/* dropdown nav — always mounted, GSAP handles open/close */}
             <nav
               ref={menuRef}
               aria-label="Sections"
@@ -1529,16 +1483,12 @@ export default function TextSphere() {
           </div>
 
           <div className="relative border-t border-white/12 pt-6">
-            {/* Justified, not a 4-col grid: equal gaps between neighbours, with
-                the first and last columns bound to the frame edges. */}
             <dl className="grid grid-cols-2 gap-y-6 sm:flex sm:justify-between">
               {STATS.map((s, i) => (
                 <div
                   data-reveal
                   key={s.label}
                   className={`flex flex-col gap-1.5 ${
-                    // The row closes flush at both frame edges: first column
-                    // left-bound, last column right-bound, like the rule above.
                     i === STATS.length - 1 ? "items-end text-right" : ""
                   }`}
                 >
@@ -1562,8 +1512,7 @@ export default function TextSphere() {
         </footer>
       </div>
 
-      {/* Hero frame — one hard-cornered hairline around the whole section,
-          pinned with the same registration marks as the buttons. */}
+      {/* hero frame */}
       <div className="pointer-events-none absolute inset-1.5 border border-white/20 sm:inset-3">
         <Cross className="-top-[5px] -left-[5px]" />
         <Cross className="-top-[5px] -right-[5px]" />
@@ -1571,7 +1520,6 @@ export default function TextSphere() {
         <Cross className="-bottom-[5px] -right-[5px]" />
       </div>
 
-      {/* Comet cursor — topmost layer, never intercepts input. */}
       <CursorTrail />
     </section>
   );
